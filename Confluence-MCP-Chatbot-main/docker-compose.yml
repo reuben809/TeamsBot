@@ -1,0 +1,68 @@
+version: '3.9'
+
+# =============================================================================
+# Atlassian Teams Bot — Docker Compose
+#
+# Services:
+#   mcp-atlassian  — Python MCP server (BYOT mode, stateless HTTP)
+#   teams-bot      — Node.js Teams bot + AI orchestrator
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # mcp-atlassian — FastMCP server in stateless HTTP mode
+  #
+  # Credentials are NOT pre-configured here — each request carries its own
+  # BYOT headers (X-Atlassian-Jira-Personal-Token, etc.) injected by the
+  # teams-bot based on the authenticated user's session.
+  # ---------------------------------------------------------------------------
+  mcp-atlassian:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Stateless HTTP: each POST is independent — no persistent session needed
+      FASTMCP_STATELESS_HTTP: "true"
+      # HTTP transport mode
+      MCP_TRANSPORT: "streamable-http"
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      # No pre-configured credentials — rely on per-request BYOT headers
+      # Optional: set LOG_LEVEL for debugging
+      LOG_LEVEL: "${MCP_LOG_LEVEL:-WARNING}"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # teams-bot — Node.js Express server, Teams Bot Framework + AI orchestrator
+  # ---------------------------------------------------------------------------
+  teams-bot:
+    build:
+      context: ./teams-bot
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./teams-bot/.env
+    environment:
+      # Override MCP URL to use the container hostname
+      MCP_SERVER_URL: "http://mcp-atlassian:3000/mcp"
+      NODE_ENV: "production"
+    ports:
+      - "3978:3978"
+    depends_on:
+      mcp-atlassian:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3978/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
