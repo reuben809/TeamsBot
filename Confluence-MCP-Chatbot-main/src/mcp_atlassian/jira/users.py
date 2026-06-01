@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import requests
 from requests.exceptions import HTTPError
@@ -106,6 +106,62 @@ class UsersMixin(JiraClient):
             logger.error(f"Error getting current user account ID: {e}", exc_info=True)
             error_msg = f"Unable to get current user account ID: {e}"
             raise Exception(error_msg) from e
+
+    def get_current_user_details(self) -> dict[str, Any]:
+        """Get the full profile of the current user.
+
+        Returns:
+            The raw ``myself`` response as a dict.
+
+        Raises:
+            Exception: If the user details cannot be retrieved.
+        """
+        try:
+            myself_data = self.jira.myself()
+            if not isinstance(myself_data, dict):
+                raise Exception(
+                    "Failed to get user data: response was not a dictionary."
+                )
+            return myself_data
+        except Exception as e:
+            logger.error(f"Error getting current user details: {e}", exc_info=True)
+            raise Exception(f"Unable to get current user details: {e}") from e
+
+    def get_current_user_permissions(
+        self, project_key: str | None = None
+    ) -> dict[str, Any]:
+        """Get the current user's permission matrix.
+
+        Uses the ``/rest/api/latest/mypermissions`` endpoint, which works on both
+        Jira Cloud and Server/Data Center.
+
+        Args:
+            project_key: Optional project key to scope the permission check.
+
+        Returns:
+            A mapping of permission name to a boolean indicating whether the
+            current user holds it.
+
+        Raises:
+            Exception: If the permissions cannot be retrieved.
+        """
+        try:
+            base_url = str(self.config.url).rstrip("/")
+            url = f"{base_url}/rest/api/latest/mypermissions"
+            params = {"projectKey": project_key} if project_key else None
+            response = self.jira._session.get(
+                url, params=params, timeout=self.config.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            permissions = data.get("permissions", {})
+            return {
+                name: bool(detail.get("havePermission", False))
+                for name, detail in permissions.items()
+            }
+        except Exception as e:
+            logger.error(f"Error getting current user permissions: {e}", exc_info=True)
+            raise Exception(f"Unable to get current user permissions: {e}") from e
 
     def _get_account_id(self, assignee: str) -> str:
         """

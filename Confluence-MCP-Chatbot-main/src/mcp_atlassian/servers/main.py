@@ -39,6 +39,7 @@ from mcp_atlassian.utils.token_verifier import AtlassianOpaqueTokenVerifier
 from mcp_atlassian.utils.tools import get_enabled_tools, should_include_tool
 from mcp_atlassian.utils.toolsets import (
     get_enabled_toolsets,
+    get_toolset_tag,
     should_include_tool_by_toolset,
 )
 from mcp_atlassian.utils.urls import is_atlassian_cloud_url, validate_url_for_ssrf
@@ -46,10 +47,22 @@ from mcp_atlassian.utils.urls import is_atlassian_cloud_url, validate_url_for_ss
 from .client_storage import build_oauth_client_storage_from_env
 from .confluence import confluence_mcp
 from .context import MainAppContext
+from .context_loader import (
+    get_inject_toolsets,
+    inject_context_into_description,
+    load_role_context,
+)
 from .jira import jira_mcp
 from .oauth_proxy import HardenedOAuthProxy, parse_env_list
+from .startup_validator import log_stdio_startup_validation
 
 logger = logging.getLogger("mcp-atlassian.server.main")
+
+# Role-based behavioural context, loaded once at import. Injected into the
+# descriptions of workflow tools so clients that ignore MCP prompts (e.g.
+# GitHub Copilot) still receive the guidance. Empty when no context is found.
+_ROLE_CONTEXT = load_role_context()
+_CONTEXT_INJECT_TOOLSETS = get_inject_toolsets()
 
 DEFAULT_HOST = "0.0.0.0"  # noqa: S104
 DEFAULT_ALLOWED_REDIRECT_URIS = [
@@ -169,6 +182,16 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict[str,
     logger.info(f"Read-only mode: {'ENABLED' if read_only else 'DISABLED'}")
     logger.info(f"Enabled tools filter: {enabled_tools or 'All tools enabled'}")
     logger.info(f"Enabled toolsets filter: {sorted(enabled_toolsets)}")
+    if _ROLE_CONTEXT:
+        logger.info(
+            f"Role context active (role='{os.getenv('MCP_USER_ROLE', 'default')}'); "
+            f"injecting into toolsets: {sorted(_CONTEXT_INJECT_TOOLSETS)}"
+        )
+
+    # Best-effort credential check for local (stdio) usage. No-op when Jira is
+    # not configured; only logs the authenticated identity or a warning.
+    if loaded_jira_config is not None:
+        log_stdio_startup_validation()
 
     try:
         yield {"app_lifespan_context": app_context}
@@ -321,6 +344,12 @@ class AtlassianMCP(FastMCP[MainAppContext]):
 
             mcp_tool = tool_obj.to_mcp_tool(name=registered_name)
             _sanitize_schema_for_compatibility(mcp_tool)
+            if _ROLE_CONTEXT:
+                toolset_name = get_toolset_tag(tool_tags)
+                if toolset_name in _CONTEXT_INJECT_TOOLSETS:
+                    mcp_tool.description = inject_context_into_description(
+                        mcp_tool.description, _ROLE_CONTEXT
+                    )
             filtered_tools.append(mcp_tool)
 
         logger.debug(

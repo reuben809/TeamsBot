@@ -52,6 +52,17 @@ class TestWorklogMixin:
         assert worklog_mixin._parse_time_spent("1d 6h") == 108000
         assert worklog_mixin._parse_time_spent("1w 2d 3h 4m") == 788640
 
+    def test_parse_time_spent_with_decimal_units(self, worklog_mixin):
+        """Decimal units like '1.5h' must not be truncated to the trailing int.
+
+        Regression: the old regex r"(\\d+)([wdhm])" matched only '5h' in
+        '1.5h', yielding 5h instead of 1.5h.
+        """
+        assert worklog_mixin._parse_time_spent("1.5h") == 5400
+        assert worklog_mixin._parse_time_spent("0.5h") == 1800
+        assert worklog_mixin._parse_time_spent("2.5d") == 216000
+        assert worklog_mixin._parse_time_spent("1.5h 30m") == 7200
+
     def test_parse_time_spent_with_invalid_input(self, worklog_mixin):
         """Test parsing time spent with invalid input."""
         # Should default to 60 seconds
@@ -465,3 +476,93 @@ class TestWorklogMixin:
         server_worklog_mixin.jira.resource_url.assert_called_with("issue")
         server_worklog_mixin._post_api3.assert_not_called()
         assert result["id"] == "10003"
+
+
+class TestTempoWorklog:
+    """Tests for WorklogMixin.add_tempo_worklog."""
+
+    @pytest.fixture
+    def tempo_mixin(self, jira_client):
+        """WorklogMixin with a mocked session."""
+        mixin = WorklogMixin(config=jira_client.config)
+        mixin.jira = jira_client.jira
+        mixin.jira._session = MagicMock()
+        return mixin
+
+    def _mock_response(self, payload):
+        response = MagicMock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_add_tempo_worklog_posts_expected_payload(self, tempo_mixin):
+        """It posts to the Tempo endpoint with a well-formed payload."""
+        tempo_mixin.jira._session.post.return_value = self._mock_response(
+            {"id": 555, "timeSpentSeconds": 9000}
+        )
+
+        result = tempo_mixin.add_tempo_worklog(
+            issue_key="PROJ-123",
+            time_spent_seconds=9000,
+            start_date="2024-01-15",
+            comment="DB work",
+        )
+
+        tempo_mixin.jira._session.post.assert_called_once()
+        call_args, call_kwargs = tempo_mixin.jira._session.post.call_args
+        # URL is built from config.url + Tempo path.
+        assert call_args[0] == (
+            "https://test.atlassian.net/rest/tempo-timesheets/4/worklogs"
+        )
+        payload = call_kwargs["json"]
+        assert payload["originTaskId"] == "PROJ-123"
+        assert payload["issue"] == {"key": "PROJ-123"}
+        assert payload["timeSpentSeconds"] == 9000
+        assert payload["billableSeconds"] == 9000  # defaults to time spent
+        assert payload["started"] == "2024-01-15"
+        assert payload["comment"] == "DB work"
+        # No worker passed -> key omitted so Tempo uses the authenticated user.
+        assert "worker" not in payload
+        assert result == {"id": 555, "timeSpentSeconds": 9000}
+
+    def test_add_tempo_worklog_explicit_worker_and_billable(self, tempo_mixin):
+        """Explicit worker and billable seconds override the defaults."""
+        tempo_mixin.jira._session.post.return_value = self._mock_response({"id": 1})
+
+        tempo_mixin.add_tempo_worklog(
+            issue_key="PROJ-9",
+            time_spent_seconds=3600,
+            start_date="2024-02-01",
+            worker="asmith",
+            billable_seconds=1800,
+        )
+
+        payload = tempo_mixin.jira._session.post.call_args.kwargs["json"]
+        assert payload["worker"] == "asmith"
+        assert payload["billableSeconds"] == 1800
+
+    def test_add_tempo_worklog_unwraps_list_response(self, tempo_mixin):
+        """A list response returns its first element."""
+        tempo_mixin.jira._session.post.return_value = self._mock_response(
+            [{"id": "first"}, {"id": "second"}]
+        )
+
+        result = tempo_mixin.add_tempo_worklog(
+            issue_key="PROJ-1",
+            time_spent_seconds=60,
+            start_date="2024-03-03",
+        )
+        assert result == {"id": "first"}
+
+    def test_add_tempo_worklog_raises_on_http_error(self, tempo_mixin):
+        """HTTP errors are wrapped in a descriptive exception."""
+        response = MagicMock()
+        response.raise_for_status.side_effect = Exception("403 Forbidden")
+        tempo_mixin.jira._session.post.return_value = response
+
+        with pytest.raises(Exception, match="Failed to log time in Tempo"):
+            tempo_mixin.add_tempo_worklog(
+                issue_key="PROJ-2",
+                time_spent_seconds=60,
+                start_date="2024-04-04",
+            )

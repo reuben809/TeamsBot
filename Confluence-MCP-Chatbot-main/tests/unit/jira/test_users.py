@@ -903,3 +903,57 @@ class TestUnicodeLookup:
         # Searching with the email should match (case insensitive)
         account_id = users_mixin._lookup_user_directly("TËST@EXAMPLE.COM")
         assert account_id == "email-account-id"
+
+
+class TestCurrentUserDiagnostics:
+    """Tests for get_current_user_details and get_current_user_permissions."""
+
+    @pytest.fixture
+    def users_mixin(self, jira_client):
+        mixin = UsersMixin(config=jira_client.config)
+        mixin.jira = jira_client.jira
+        mixin.jira._session = MagicMock()
+        return mixin
+
+    def test_get_current_user_details_returns_profile(self, users_mixin):
+        users_mixin.jira.myself.return_value = {
+            "displayName": "Jane Doe",
+            "emailAddress": "jane@example.com",
+            "key": "jdoe",
+        }
+        details = users_mixin.get_current_user_details()
+        assert details["displayName"] == "Jane Doe"
+        assert details["key"] == "jdoe"
+
+    def test_get_current_user_details_raises_on_bad_response(self, users_mixin):
+        users_mixin.jira.myself.return_value = "not-a-dict"
+        with pytest.raises(Exception, match="Unable to get current user details"):
+            users_mixin.get_current_user_details()
+
+    def test_get_current_user_permissions_maps_booleans(self, users_mixin):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "permissions": {
+                "CREATE_ISSUES": {"havePermission": True},
+                "ADMINISTER": {"havePermission": False},
+            }
+        }
+        users_mixin.jira._session.get.return_value = response
+
+        perms = users_mixin.get_current_user_permissions(project_key="PROJ")
+
+        assert perms == {"CREATE_ISSUES": True, "ADMINISTER": False}
+        call = users_mixin.jira._session.get.call_args
+        assert call.args[0].endswith("/rest/api/latest/mypermissions")
+        assert call.kwargs["params"] == {"projectKey": "PROJ"}
+
+    def test_get_current_user_permissions_no_project(self, users_mixin):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"permissions": {}}
+        users_mixin.jira._session.get.return_value = response
+
+        perms = users_mixin.get_current_user_permissions()
+        assert perms == {}
+        assert users_mixin.jira._session.get.call_args.kwargs["params"] is None

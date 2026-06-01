@@ -40,13 +40,18 @@ class WorklogMixin(JiraClient):
             "m": 60,  # minutes to seconds
         }
 
-        # Regular expression to find time components like 1w, 2d, 3h, 4m
-        pattern = r"(\d+)([wdhm])"
+        # Regular expression to find time components like 1w, 2d, 3h, 4m.
+        # Allow decimals (Jira accepts "1.5h") by capturing digits and dots.
+        pattern = r"([\d.]+)([wdhm])"
         matches = re.findall(pattern, time_spent)
 
         for value, unit in matches:
-            # Convert value to int and multiply by the unit in seconds
-            seconds = int(value) * time_units[unit]
+            # Parse as float to support fractional units, then floor to int
+            # seconds. Skip malformed values like "1.5.5" rather than crash.
+            try:
+                seconds = int(float(value) * time_units[unit])
+            except ValueError:
+                continue
             total_seconds += seconds
 
         if total_seconds == 0:
@@ -164,6 +169,76 @@ class WorklogMixin(JiraClient):
         except Exception as e:
             logger.error(f"Error adding worklog to issue {issue_key}: {str(e)}")
             raise Exception(f"Error adding worklog: {str(e)}") from e
+
+    def add_tempo_worklog(
+        self,
+        issue_key: str,
+        time_spent_seconds: int,
+        start_date: str,
+        comment: str = "",
+        worker: str | None = None,
+        billable_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Log time directly to Tempo Timesheets on Jira Server/Data Center.
+
+        Uses the internal ``/rest/tempo-timesheets/4/worklogs`` endpoint via the
+        already-authenticated Jira session, so no separate Tempo token is needed.
+
+        Args:
+            issue_key: The issue key to log against (e.g. 'PROJ-123').
+            time_spent_seconds: Time spent in seconds.
+            start_date: Date the work started, formatted as 'YYYY-MM-DD'.
+            comment: Optional worklog comment (plain text).
+            worker: Optional Tempo worker key. When omitted, Tempo attributes
+                the worklog to the authenticated user.
+            billable_seconds: Optional billable seconds; defaults to time_spent.
+
+        Returns:
+            The created Tempo worklog as returned by the API.
+
+        Raises:
+            Exception: If the Tempo worklog cannot be created.
+        """
+        try:
+            payload: dict[str, Any] = {
+                "originTaskId": issue_key,
+                "issue": {"key": issue_key},
+                "timeSpentSeconds": time_spent_seconds,
+                "billableSeconds": (
+                    billable_seconds
+                    if billable_seconds is not None
+                    else time_spent_seconds
+                ),
+                "started": start_date,
+                "dateStarted": start_date,
+                "comment": comment,
+            }
+            # Tempo's worker defaults to the authenticated user when omitted;
+            # callers that know the worker key (e.g. logging on behalf of
+            # another user) can pass it explicitly.
+            if worker is not None:
+                payload["worker"] = worker
+
+            base_url = str(self.config.url).rstrip("/")
+            url = f"{base_url}/rest/tempo-timesheets/4/worklogs"
+
+            # self.jira._session carries the configured auth (PAT/OAuth/basic),
+            # SSL settings, and proxies.
+            response = self.jira._session.post(
+                url, json=payload, timeout=self.config.timeout
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            # Tempo may return a single object or a list of created worklogs.
+            if isinstance(result, list):
+                return result[0] if result else {}
+            if isinstance(result, dict):
+                return result
+            return {"raw": result}
+        except Exception as e:
+            logger.error(f"Error adding Tempo worklog to {issue_key}: {str(e)}")
+            raise Exception(f"Failed to log time in Tempo: {str(e)}") from e
 
     def get_worklog(self, issue_key: str) -> dict[str, Any]:
         """
