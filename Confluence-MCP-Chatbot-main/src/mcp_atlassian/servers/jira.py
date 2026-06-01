@@ -3273,3 +3273,14 @@ async def get_issues_development_info(
         logger.error(f"Error getting development info for issues: {str(e)}")
         error_result = {"success": False, "error": str(e)}
         return json.dumps(error_result, indent=2, ensure_ascii=False)
+
+
+# --- Additional tool registrations -----------------------------------------
+# Tempo time-logging and PAT/context diagnostic tools are registered here so
+# they live on the same ``jira_mcp`` instance and are picked up when ``main``
+# imports it.
+from mcp_atlassian.servers.pat_tools import register_pat_tools  # noqa: E402
+from mcp_atlassian.servers.tempo_tools import register_tempo_tools  # noqa: E402
+
+register_tempo_tools(jira_mcp)
+register_pat_tools(jira_mcp)
