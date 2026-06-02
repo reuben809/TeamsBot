@@ -500,6 +500,8 @@ class TestTempoWorklog:
         tempo_mixin.jira._session.post.return_value = self._mock_response(
             {"id": 555, "timeSpentSeconds": 9000}
         )
+        # Mock the issue fetch to return an internal ID
+        tempo_mixin.jira.issue.return_value = {"id": "9999"}
 
         result = tempo_mixin.add_tempo_worklog(
             issue_key="PROJ-123",
@@ -508,6 +510,7 @@ class TestTempoWorklog:
             comment="DB work",
         )
 
+        tempo_mixin.jira.issue.assert_called_once_with("PROJ-123", fields="id")
         tempo_mixin.jira._session.post.assert_called_once()
         call_args, call_kwargs = tempo_mixin.jira._session.post.call_args
         # URL is built from config.url + Tempo path.
@@ -515,19 +518,20 @@ class TestTempoWorklog:
             "https://test.atlassian.net/rest/tempo-timesheets/4/worklogs"
         )
         payload = call_kwargs["json"]
-        assert payload["originTaskId"] == "PROJ-123"
-        assert payload["issue"] == {"key": "PROJ-123"}
+        assert payload["originTaskId"] == "9999"
+        assert payload.get("issue") is None
         assert payload["timeSpentSeconds"] == 9000
         assert payload["billableSeconds"] == 9000  # defaults to time spent
         assert payload["started"] == "2024-01-15"
         assert payload["comment"] == "DB work"
-        # No worker passed -> key omitted so Tempo uses the authenticated user.
+        # No worker passed -> key omitted so Tempo uses the authenticated user (or whatever logic handles it).
         assert "worker" not in payload
         assert result == {"id": 555, "timeSpentSeconds": 9000}
 
     def test_add_tempo_worklog_explicit_worker_and_billable(self, tempo_mixin):
         """Explicit worker and billable seconds override the defaults."""
         tempo_mixin.jira._session.post.return_value = self._mock_response({"id": 1})
+        tempo_mixin.jira.issue.return_value = {"id": "111"}
 
         tempo_mixin.add_tempo_worklog(
             issue_key="PROJ-9",
@@ -546,6 +550,7 @@ class TestTempoWorklog:
         tempo_mixin.jira._session.post.return_value = self._mock_response(
             [{"id": "first"}, {"id": "second"}]
         )
+        tempo_mixin.jira.issue.return_value = {"id": "222"}
 
         result = tempo_mixin.add_tempo_worklog(
             issue_key="PROJ-1",
@@ -559,6 +564,7 @@ class TestTempoWorklog:
         response = MagicMock()
         response.raise_for_status.side_effect = Exception("403 Forbidden")
         tempo_mixin.jira._session.post.return_value = response
+        tempo_mixin.jira.issue.return_value = {"id": "333"}
 
         with pytest.raises(Exception, match="Failed to log time in Tempo"):
             tempo_mixin.add_tempo_worklog(

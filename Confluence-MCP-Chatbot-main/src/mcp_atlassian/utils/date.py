@@ -1,7 +1,7 @@
 """Utility functions for date operations."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import dateutil.parser
 
@@ -34,7 +34,7 @@ def parse_date(date_str: str | int | None) -> datetime | None:
             # Check if timestamp is within valid range to avoid OSError
             # Valid range: -62135596800000 (year 1) to 253402300799999 (year 9999)
             if -62135596800000 <= timestamp_ms <= 253402300799999:
-                return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=timestamp_ms)
             else:
                 # Timestamp out of range - return None for graceful handling
                 logger.warning(

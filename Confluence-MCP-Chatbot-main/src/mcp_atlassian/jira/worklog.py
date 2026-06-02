@@ -200,9 +200,12 @@ class WorklogMixin(JiraClient):
             Exception: If the Tempo worklog cannot be created.
         """
         try:
+            # Fetch the internal numeric issue ID as Tempo expects it for originTaskId
+            issue_data = self.jira.issue(issue_key, fields="id")
+            issue_id = issue_data.get("id", issue_key) if isinstance(issue_data, dict) else issue_key
+            
             payload: dict[str, Any] = {
-                "originTaskId": issue_key,
-                "issue": {"key": issue_key},
+                "originTaskId": issue_id,
                 "timeSpentSeconds": time_spent_seconds,
                 "billableSeconds": (
                     billable_seconds
@@ -210,8 +213,8 @@ class WorklogMixin(JiraClient):
                     else time_spent_seconds
                 ),
                 "started": start_date,
-                "dateStarted": start_date,
                 "comment": comment,
+                "attributes": {},
             }
             # Tempo's worker defaults to the authenticated user when omitted;
             # callers that know the worker key (e.g. logging on behalf of
