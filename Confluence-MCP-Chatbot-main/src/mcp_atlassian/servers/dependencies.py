@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from cachetools import TTLCache
 from fastmcp import Context
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from starlette.requests import Request
@@ -27,6 +28,23 @@ if TYPE_CHECKING:
     from mcp_atlassian.jira.config import JiraConfig as UserJiraConfigType
 
 logger = logging.getLogger("mcp-atlassian.servers.dependencies")
+
+# Cache validation results for 5 minutes to avoid redundant Atlassian API
+# roundtrips when the same token is used across sequential tool calls in
+# stateless-HTTP mode (each call is a new POST request with a fresh state).
+_validation_cache: TTLCache[int, Any] = TTLCache(maxsize=200, ttl=300)
+
+
+def _get_validation_cache_key(config: JiraConfig | ConfluenceConfig) -> int:
+    """Derive a stable integer cache key from the auth credentials in config."""
+    if config.auth_type == "pat":
+        secret = config.personal_token or ""
+    elif config.auth_type == "basic":
+        secret = f"{config.username or ''}:{config.api_token or ''}"
+    else:  # oauth
+        oauth = getattr(config, "oauth_config", None)
+        secret = getattr(oauth, "access_token", "") or ""
+    return hash((config.url, config.auth_type, secret))
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +249,16 @@ def _create_and_validate(
             session.hooks["response"].append(
                 _make_ssrf_safe_hook(validate_url_for_ssrf)
             )
-        validation_data = spec.validate_fn(fetcher)
+        cache_key = _get_validation_cache_key(config)
+        if cache_key in _validation_cache:
+            logger.debug(
+                f"{fn_name}: Skipping {spec.name} credential validation "
+                "(cache hit — validated within the last 5 minutes)."
+            )
+            validation_data = _validation_cache[cache_key]
+        else:
+            validation_data = spec.validate_fn(fetcher)
+            _validation_cache[cache_key] = validation_data
         spec.on_validated(
             fn_name,
             request,

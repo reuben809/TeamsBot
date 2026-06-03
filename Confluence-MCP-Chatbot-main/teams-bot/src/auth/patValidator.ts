@@ -103,7 +103,9 @@ export async function validatePatIdentity(creds: UserCredentials): Promise<Valid
 
   // --- Confluence validation (optional) ---
   if (creds.confluenceUrl && creds.confluencePat) {
-    const confBase = creds.confluenceUrl.replace(/\/$/, '');
+    // Strip any trailing /wiki so we never produce a double /wiki/wiki/... path.
+    // Cloud users sometimes include /wiki in the URL they paste; this normalizes both cases.
+    const confBase = creds.confluenceUrl.replace(/\/$/, '').replace(/\/wiki$/, '');
     const confHeaders = bearerHeaders(creds.confluencePat);
 
     try {

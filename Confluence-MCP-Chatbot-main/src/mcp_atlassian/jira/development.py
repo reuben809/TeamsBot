@@ -1,6 +1,7 @@
 """Module for Jira development information operations (PRs, commits, branches)."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .client import JiraClient
@@ -64,11 +65,14 @@ class DevelopmentMixin(JiraClient):
                     issue_key, issue_id, application_type, data_type
                 )
 
-            # Otherwise, try common application types and merge results
-            # Common types: stash (Bitbucket Server), bitbucket, github, gitlab
+            # Fan out all (app_type, data_type) combinations in parallel.
+            # Sequential calls produced up to 12 roundtrips; concurrent execution
+            # reduces wall time to approximately one roundtrip.
             app_types = ["stash", "bitbucket", "github", "gitlab"]
-            # Data types to try for each app type
             data_types = ["pullrequest", "branch", "repository"]
+            combinations = [
+                (at, dt) for at in app_types for dt in data_types
+            ]
             merged_result: dict[str, Any] = {
                 "issue_key": issue_key,
                 "detail": [],
@@ -78,36 +82,39 @@ class DevelopmentMixin(JiraClient):
                 "repositories": [],
             }
 
-            for app_type in app_types:
-                for dt in data_types:
-                    try:
-                        result = self._fetch_dev_info_for_app_type(
-                            issue_key, issue_id, app_type, dt
-                        )
-                        if "error" in result:
-                            # Plugin unavailable or access denied — capture the first
-                            # error and stop; all subsequent calls will fail the same way
-                            if not merged_result.get("error"):
-                                merged_result["error"] = result["error"]
-                            break
-                        # Merge results
-                        merged_result["detail"].extend(result.get("detail", []))
-                        merged_result["pullRequests"].extend(
-                            result.get("pullRequests", [])
-                        )
-                        merged_result["branches"].extend(result.get("branches", []))
-                        merged_result["commits"].extend(result.get("commits", []))
-                        for repo in result.get("repositories", []):
-                            if repo not in merged_result["repositories"]:
-                                merged_result["repositories"].append(repo)
-                    except Exception as e:
-                        # Log but continue trying other combinations
-                        logger.debug(
-                            f"No dev info for {issue_key} "
-                            f"from {app_type}/{dt}: {str(e)}"
-                        )
-                if merged_result.get("error"):
-                    break
+            def _fetch_one(at: str, dt: str) -> dict[str, Any] | None:
+                try:
+                    return self._fetch_dev_info_for_app_type(
+                        issue_key, issue_id, at, dt
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"No dev info for {issue_key} from {at}/{dt}: {e}"
+                    )
+                    return None
+
+            with ThreadPoolExecutor(max_workers=len(combinations)) as pool:
+                futures = {
+                    pool.submit(_fetch_one, at, dt): (at, dt)
+                    for at, dt in combinations
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is None:
+                        continue
+                    if "error" in result:
+                        if not merged_result.get("error"):
+                            merged_result["error"] = result["error"]
+                        continue
+                    merged_result["detail"].extend(result.get("detail", []))
+                    merged_result["pullRequests"].extend(
+                        result.get("pullRequests", [])
+                    )
+                    merged_result["branches"].extend(result.get("branches", []))
+                    merged_result["commits"].extend(result.get("commits", []))
+                    for repo in result.get("repositories", []):
+                        if repo not in merged_result["repositories"]:
+                            merged_result["repositories"].append(repo)
 
             return merged_result
 

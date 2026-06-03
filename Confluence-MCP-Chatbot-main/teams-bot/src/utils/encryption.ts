@@ -1,17 +1,39 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
-const IV_LEN = 16;
+const IV_LEN = 12;
 const SALT_LEN = 32;
 const TAG_LEN = 16;
 const KEY_LEN = 32;
 
+// Fixed application salt. ENCRYPTION_KEY is a high-entropy secret (not a
+// user-chosen password), so a constant salt is cryptographically acceptable
+// here and — crucially — makes the derived key deterministic so it can be
+// cached. scryptSync is CPU-heavy (~50-150ms) and runs synchronously on the
+// main thread; without caching it would block the event loop on every
+// encrypt/decrypt (i.e. every credential store/read).
+const STATIC_SALT = Buffer.from(
+  'mcp-atlassian-teams-bot-kdf-salt-v1',
+  'utf8'
+).subarray(0, SALT_LEN);
+
+// Cache derived keys per (masterKey, salt). Bounds at one entry per distinct
+// master key in practice; legacy random-salt blobs still decrypt correctly
+// (cache miss → derive on demand).
+const keyCache = new Map<string, Buffer>();
+
 function deriveKey(password: string, salt: Buffer): Buffer {
-  return scryptSync(password, salt, KEY_LEN) as Buffer;
+  const cacheKey = `${password}:${salt.toString('hex')}`;
+  let key = keyCache.get(cacheKey);
+  if (!key) {
+    key = scryptSync(password, salt, KEY_LEN) as Buffer;
+    keyCache.set(cacheKey, key);
+  }
+  return key;
 }
 
 export function encrypt(plaintext: string, masterKey: string): string {
-  const salt = randomBytes(SALT_LEN);
+  const salt = STATIC_SALT;
   const iv = randomBytes(IV_LEN);
   const key = deriveKey(masterKey, salt);
 

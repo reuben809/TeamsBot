@@ -11,10 +11,17 @@
  */
 
 import axios, { AxiosError } from 'axios';
-import type { IncomingMessage } from 'http';
+import { Agent as HttpAgent, type IncomingMessage } from 'http';
+import { Agent as HttpsAgent } from 'https';
 import { config } from '../config';
 import { UserCredentials, MCPTool, MCPCallResult } from '../types';
 import { logger } from '../utils/logger';
+
+// Reuse TCP/TLS connections across the many small POSTs we make to the MCP
+// server (initialize + tools/list + tools/call per turn). Without keep-alive
+// each call pays a fresh TCP + TLS handshake.
+const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 50 });
 
 interface JsonRpcResponse<T = unknown> {
   jsonrpc: string;
@@ -72,6 +79,8 @@ async function rpc<T>(
       headers: byotHeaders(creds),
       responseType: 'stream',
       timeout: 45_000,
+      httpAgent,
+      httpsAgent,
     });
 
     return await new Promise<T>((resolve, reject) => {
@@ -107,12 +116,40 @@ async function initialize(creds: UserCredentials): Promise<void> {
   });
 }
 
+// The server advertises the same toolset to every user (BYOT only changes
+// which credentials are used, not which tools exist), so the list is cacheable
+// across requests. Key by service-set in case the available tools ever differ
+// by whether Confluence creds are present.
+interface ToolCacheEntry {
+  tools: MCPTool[];
+  expiresAt: number;
+}
+const TOOL_CACHE_TTL_MS = 30 * 60 * 1000;
+const toolCache = new Map<string, ToolCacheEntry>();
+
+function toolCacheKey(creds: UserCredentials): string {
+  return creds.confluenceUrl && creds.confluencePat ? 'jira+confluence' : 'jira';
+}
+
 export async function listMCPTools(creds: UserCredentials): Promise<MCPTool[]> {
+  const cacheKey = toolCacheKey(creds);
+  const cached = toolCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.tools;
+  }
+
   try {
     await initialize(creds);
     const result = await rpc<{ tools: MCPTool[] }>(creds, 'tools/list', {});
-    logger.debug(`MCP tools/list returned ${result.tools?.length ?? 0} tools`);
-    return result.tools ?? [];
+    const tools = result.tools ?? [];
+    logger.debug(`MCP tools/list returned ${tools.length} tools`);
+    if (tools.length > 0) {
+      toolCache.set(cacheKey, {
+        tools,
+        expiresAt: Date.now() + TOOL_CACHE_TTL_MS,
+      });
+    }
+    return tools;
   } catch (err) {
     logger.warn('listMCPTools failed', (err as Error).message);
     return [];
