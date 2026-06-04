@@ -5,6 +5,8 @@ import logging
 import mimetypes
 from collections.abc import Callable
 
+mimetypes.add_type("application/zip", ".zip")
+
 logger = logging.getLogger(__name__)
 
 # Maximum attachment size for inline download (50 MB).

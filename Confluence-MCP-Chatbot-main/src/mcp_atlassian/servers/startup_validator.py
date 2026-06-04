@@ -51,8 +51,16 @@ def validate_jira_stdio_credentials() -> dict[str, Any] | None:
         }
         return {"valid": True, "user": user}
     except Exception as e:  # noqa: BLE001 - startup diagnostics only
-        logger.warning("Jira PAT validation at startup failed: %s", e)
-        return {"valid": False, "error": str(e)}
+        from requests.exceptions import HTTPError
+        err_msg = str(e)
+        if isinstance(e, HTTPError) and e.response is not None:
+            status_code = e.response.status_code
+            text = e.response.text or ""
+            err_msg = f"HTTP {status_code} - {text or e.response.reason or 'Unauthorized'}"
+        elif not err_msg:
+            err_msg = repr(e)
+        logger.warning("Jira PAT validation at startup failed: %s", err_msg)
+        return {"valid": False, "error": err_msg}
 
 
 def log_stdio_startup_validation() -> None:
