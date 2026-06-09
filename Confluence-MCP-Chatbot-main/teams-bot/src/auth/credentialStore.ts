@@ -1,6 +1,5 @@
 import { UserCredentials } from '../types';
 import { encrypt, decrypt } from '../utils/encryption';
-import { config } from '../config';
 import { logger } from '../utils/logger';
 
 interface StoreEntry {
@@ -16,7 +15,7 @@ const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export function storeCredentials(userId: string, creds: UserCredentials): void {
   const plaintext = JSON.stringify(creds);
-  const ciphertext = encrypt(plaintext, config.ENCRYPTION_KEY);
+  const ciphertext = encrypt(plaintext);
   store.set(userId, { ciphertext, createdAt: Date.now() });
 }
 
@@ -31,7 +30,7 @@ export function getCredentials(userId: string): UserCredentials | null {
   }
 
   try {
-    const plaintext = decrypt(entry.ciphertext, config.ENCRYPTION_KEY);
+    const plaintext = decrypt(entry.ciphertext);
     return JSON.parse(plaintext) as UserCredentials;
   } catch (err) {
     logger.error('Failed to decrypt credentials — clearing entry', err);

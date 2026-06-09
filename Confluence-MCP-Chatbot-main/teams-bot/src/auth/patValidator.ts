@@ -40,6 +40,20 @@ function bearerHeaders(pat: string): Record<string, string> {
   };
 }
 
+/**
+ * Normalize a Confluence base URL so /wiki is present for Cloud and absent for
+ * Server/Data Center, regardless of what the user typed.
+ *
+ * Cloud URLs end with .atlassian.net — they require the /wiki prefix.
+ * Server/DC URLs are custom hostnames — they do NOT use /wiki.
+ * If the user already appended /wiki we strip it first to avoid doubling it.
+ */
+function buildConfluenceBase(rawUrl: string): string {
+  const base = rawUrl.replace(/\/+$/, '').replace(/\/wiki$/, '');
+  const isCloud = /\.atlassian\.net(:\d+)?$/.test(base);
+  return isCloud ? `${base}/wiki` : base;
+}
+
 function isAxiosError(err: unknown): err is AxiosError {
   return axios.isAxiosError(err);
 }
@@ -103,12 +117,12 @@ export async function validatePatIdentity(creds: UserCredentials): Promise<Valid
 
   // --- Confluence validation (optional) ---
   if (creds.confluenceUrl && creds.confluencePat) {
-    const confBase = creds.confluenceUrl.replace(/\/$/, '');
+    const confBase = buildConfluenceBase(creds.confluenceUrl);
     const confHeaders = bearerHeaders(creds.confluencePat);
 
     try {
       const { data: me } = await axios.get<ConfluenceCurrentUserResponse>(
-        `${confBase}/wiki/rest/api/user/current`,
+        `${confBase}/rest/api/user/current`,
         { headers: confHeaders, timeout: 12_000 }
       );
 
@@ -118,7 +132,7 @@ export async function validatePatIdentity(creds: UserCredentials): Promise<Valid
       }
 
       const { data: spaces } = await axios.get<ConfluenceSpacesResponse>(
-        `${confBase}/wiki/rest/api/space?limit=5&type=global`,
+        `${confBase}/rest/api/space?limit=5&type=global`,
         { headers: confHeaders, timeout: 12_000 }
       );
 

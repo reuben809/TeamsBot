@@ -26,6 +26,21 @@ interface JsonRpcResponse<T = unknown> {
 let seq = 0;
 const nextId = () => ++seq;
 
+// Tool list changes only when the server is redeployed, not between user requests.
+// Cache per user PAT for the lifetime of a session (8 h) to avoid paying the
+// initialize + tools/list round-trip on every message.
+interface ToolCacheEntry {
+  tools: MCPTool[];
+  cachedAt: number;
+}
+const TOOL_CACHE_TTL_MS = 8 * 60 * 60 * 1000;
+const toolListCache = new Map<string, ToolCacheEntry>();
+
+/** Invalidate the tool cache for a given user (call when credentials are cleared). */
+export function clearToolCache(pat: string): void {
+  toolListCache.delete(pat);
+}
+
 function byotHeaders(creds: UserCredentials): Record<string, string> {
   const h: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -108,11 +123,19 @@ async function initialize(creds: UserCredentials): Promise<void> {
 }
 
 export async function listMCPTools(creds: UserCredentials): Promise<MCPTool[]> {
+  const cached = toolListCache.get(creds.jiraPat);
+  if (cached && Date.now() - cached.cachedAt < TOOL_CACHE_TTL_MS) {
+    logger.debug(`MCP tools served from cache (${cached.tools.length} tools)`);
+    return cached.tools;
+  }
+
   try {
     await initialize(creds);
     const result = await rpc<{ tools: MCPTool[] }>(creds, 'tools/list', {});
-    logger.debug(`MCP tools/list returned ${result.tools?.length ?? 0} tools`);
-    return result.tools ?? [];
+    const tools = result.tools ?? [];
+    logger.debug(`MCP tools/list returned ${tools.length} tools`);
+    toolListCache.set(creds.jiraPat, { tools, cachedAt: Date.now() });
+    return tools;
   } catch (err) {
     logger.warn('listMCPTools failed', (err as Error).message);
     return [];

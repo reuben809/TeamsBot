@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from cachetools import TTLCache
 from fastmcp import Context
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from starlette.requests import Request
@@ -27,6 +28,14 @@ if TYPE_CHECKING:
     from mcp_atlassian.jira.config import JiraConfig as UserJiraConfigType
 
 logger = logging.getLogger("mcp-atlassian.servers.dependencies")
+
+# Cross-request token validation cache (TTL = 5 min).
+# In stateless HTTP mode every tool invocation is a new POST, so request.state
+# cannot carry the validated fetcher across calls. Without this cache an LLM
+# turn that invokes 3 tools makes 3 redundant Atlassian /myself round-trips
+# (300 ms – 1.5 s each). The cache key is hash(service + token) — collision
+# only causes an occasional cache miss, not a security issue.
+_token_validation_cache: TTLCache[int, Any] = TTLCache(maxsize=512, ttl=300)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +212,7 @@ def _create_and_validate(
     config: Any,
     auth_branch: str,
     user_email: str | None = None,
+    cache_token: str | None = None,
     *,
     attach_ssrf_hook: bool = False,
 ) -> Any:
@@ -214,6 +224,9 @@ def _create_and_validate(
         config: Service-specific config instance.
         auth_branch: One of "header_pat", "basic", "oauth_pat".
         user_email: User email from request state (for logging).
+        cache_token: Raw token string used as validation cache key. When
+            provided and the token was validated within the last 5 minutes,
+            the Atlassian /myself round-trip is skipped entirely.
         attach_ssrf_hook: Whether to attach SSRF redirect hook.
 
     Returns:
@@ -231,7 +244,25 @@ def _create_and_validate(
             session.hooks["response"].append(
                 _make_ssrf_safe_hook(validate_url_for_ssrf)
             )
-        validation_data = spec.validate_fn(fetcher)
+
+        cache_key = hash(spec.name + (cache_token or "")) if cache_token else None
+        cached_validation = (
+            _token_validation_cache.get(cache_key)
+            if cache_key is not None
+            else None
+        )
+
+        if cached_validation is not None:
+            logger.debug(
+                f"{fn_name}: Token already validated (cache hit) — "
+                "skipping Atlassian round-trip."
+            )
+            validation_data = cached_validation
+        else:
+            validation_data = spec.validate_fn(fetcher)
+            if cache_key is not None:
+                _token_validation_cache[cache_key] = validation_data
+
         spec.on_validated(
             fn_name,
             request,
@@ -558,6 +589,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 spec,
                 header_config,
                 "header_pat",
+                cache_token=token_header_val,
                 attach_ssrf_hook=True,
             )
 
@@ -590,6 +622,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 user_config,
                 "basic",
                 user_email=user_email,
+                cache_token=user_api_token,
             )
 
         # --- Branch 3: OAuth / PAT with token ---
@@ -639,6 +672,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 user_config,
                 "oauth_pat",
                 user_email=user_email,
+                cache_token=user_token,
             )
 
         else:
